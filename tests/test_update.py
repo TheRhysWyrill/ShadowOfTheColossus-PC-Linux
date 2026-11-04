@@ -74,6 +74,7 @@ class SslTests(unittest.TestCase):
                 self.assertEqual(response.read(), b'{}')
 
 
+@unittest.skipUnless(sotc_update.WINDOWS, 'the in-place zip update is Windows-only')
 class DownloadTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -128,6 +129,7 @@ class DownloadTests(unittest.TestCase):
             sotc_update.download(release, self.dir / 'update')
 
 
+@unittest.skipUnless(sotc_update.WINDOWS, 'the in-place zip update is Windows-only')
 class ApplyTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

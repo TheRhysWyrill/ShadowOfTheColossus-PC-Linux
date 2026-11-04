@@ -3,7 +3,12 @@
 
 #include "video_core/renderer_vulkan/vk_fsrfg.h"
 
+#ifdef _WIN32
 #include <windows.h>
+#else
+#include <ctime>
+#include <thread>
+#endif
 
 #include <algorithm>
 #include <array>
@@ -256,28 +261,46 @@ FfxVkFsr3_3_1_6FrameGenerationImage FgImage(vk::Image image, vk::Format format, 
     };
 }
 
-/// Sleeps until `due`: a high resolution waitable timer, then a short spin.
+/// Sleeps until `due`: a high resolution waitable timer (nanosleep on Linux), then a short spin.
 void SleepUntil(Clock::time_point due) {
+    using namespace std::chrono_literals;
+#ifdef _WIN32
     static HANDLE timer = CreateWaitableTimerExW(nullptr, nullptr,
                                                  CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
                                                  TIMER_ALL_ACCESS);
-    using namespace std::chrono_literals;
+#endif
     for (;;) {
         const auto left = due - Clock::now();
         if (left <= 0ns) {
             return;
         }
-        if (left > 1500us && timer) {
-            LARGE_INTEGER when;
-            when.QuadPart = -std::chrono::duration_cast<std::chrono::nanoseconds>(left - 1000us)
-                                 .count() /
-                            100;
-            if (SetWaitableTimer(timer, &when, 0, nullptr, nullptr, FALSE)) {
-                WaitForSingleObject(timer, INFINITE);
-                continue;
+        if (left > 1500us) {
+#ifdef _WIN32
+            if (timer) {
+                LARGE_INTEGER when;
+                when.QuadPart = -std::chrono::duration_cast<std::chrono::nanoseconds>(left - 1000us)
+                                     .count() /
+                                100;
+                if (SetWaitableTimer(timer, &when, 0, nullptr, nullptr, FALSE)) {
+                    WaitForSingleObject(timer, INFINITE);
+                    continue;
+                }
             }
+#else
+            const auto wait = left - 500us;
+            timespec ts{};
+            ts.tv_sec = static_cast<time_t>(std::chrono::duration_cast<std::chrono::seconds>(wait).count());
+            ts.tv_nsec = static_cast<long>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(wait).count() % 1000000000);
+            nanosleep(&ts, nullptr);
+            continue;
+#endif
         }
+#ifdef _WIN32
         YieldProcessor();
+#else
+        std::this_thread::yield();
+#endif
     }
 }
 

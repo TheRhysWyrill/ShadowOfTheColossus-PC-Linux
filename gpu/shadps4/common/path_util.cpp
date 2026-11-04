@@ -1,7 +1,9 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <cstring>
 #include <fstream>
+#include <string>
 #include <unordered_map>
 #include "common/logging/log.h"
 #include "common/path_util.h"
@@ -152,6 +154,15 @@ static auto UserPaths = [] {
 
     return paths;
 }();
+
+std::FILE* OpenNative(const fs::path& path, const char* mode) {
+#ifdef _WIN32
+    const std::wstring wide_mode(mode, mode + std::strlen(mode));
+    return _wfopen(path.c_str(), wide_mode.c_str());
+#else
+    return std::fopen(path.c_str(), mode);
+#endif
+}
 
 bool ValidatePath(const fs::path& path) {
     if (path.empty()) {

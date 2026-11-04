@@ -1,5 +1,10 @@
 /* Shadow of the Colossus (CUSA08809) imports that Bloodborne never calls.
  * Each function follows the PS4 contract as implemented by shadPS4 (GPL-2.0-or-later). */
+/* syscall() (gettid), random(), usleep() and struct tm's tm_gmtoff are POSIX/glibc extensions:
+ * with -std=c11 glibc hides them unless a feature macro asks for them. */
+#if !defined(_WIN32) && !defined(_GNU_SOURCE)
+#define _GNU_SOURCE
+#endif
 #define _CRT_RAND_S
 #include "runtime.h"
 #include <errno.h>
@@ -504,3 +509,11 @@ uintptr_t runtime_sotc_resolve(const char *name) {
         if (!strcmp(name,by_nid[i].nid)) return (uintptr_t)by_nid[i].function;
     return RUNTIME_LOOKUP(exports,name);
 }
+#ifndef _WIN32
+/* The BPE heap guard lives in probe.c: it hooks the guest's free() with a breakpoint and
+ * single-steps the re-arm through Windows' vectored exceptions. The Linux fault handler has no
+ * single-step yet, so the GPU side (buffer_cache.cpp) sees no guarded heap and leaves that check
+ * off instead of the executable failing to link. */
+uintptr_t runtime_sotc_heap(void) { return 0; }
+uintptr_t runtime_sotc_heap_table(void) { return 0; }
+#endif

@@ -208,7 +208,14 @@ def library_games(folders, depth=3):
 
 
 def local_drives():
-    """Fixed drive roots (no network, CD or removable media: too slow to walk)."""
+    """Fixed drive roots (no network, CD or removable media: too slow to walk). On Linux, the
+    usual mount points of fixed disks and game libraries: never '/', which would walk the whole
+    system."""
+    if os.name != 'nt':
+        user = Path.home().name
+        roots = [Path('/run/media') / user, Path('/media') / user, Path('/mnt'), Path.home() / 'Games',
+                 Path.home() / '.local' / 'share' / 'shadPS4']
+        return [str(root) for root in roots if root.is_dir()]
     roots = []
     try:
         mask = ctypes.windll.kernel32.GetLogicalDrives()
@@ -232,7 +239,10 @@ def scan(seconds=25.0, depth=5, extra_roots=()):
     deadline = time.monotonic() + seconds
     home = Path.home()
     appdata = Path(os.environ.get('APPDATA', home))
-    likely = [*extra_roots, appdata / 'shadPS4', home / 'Desktop', home / 'Downloads', home / 'Documents',
+    # shadPS4 keeps its user folder in %APPDATA% on Windows, ~/.local/share (or ~/.config) elsewhere.
+    shadps4 = ([appdata / 'shadPS4'] if os.name == 'nt' else
+               [home / '.local' / 'share' / 'shadPS4', home / '.config' / 'shadPS4'])
+    likely = [*extra_roots, *shadps4, home / 'Desktop', home / 'Downloads', home / 'Documents',
               home / 'Games', home]
     roots = [str(p) for p in likely if Path(p).is_dir()] + local_drives()
 

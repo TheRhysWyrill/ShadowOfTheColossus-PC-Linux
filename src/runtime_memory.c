@@ -219,6 +219,8 @@ void runtime_memory_lock_stats(uint64_t *writes, double *wait_ms, double *hold_m
 void runtime_memory_lock_stats2(double *worst_hold_ms, uint64_t *read_waits, double *read_wait_ms) {
     *worst_hold_ms=*read_wait_ms=0; *read_waits=0;
 }
+/* Live-view splitting is Windows-only; the GPU report asks for the count on Linux too. */
+uint64_t runtime_memory_carve_splits(void) { return 0; }
 void runtime_memory_carve_stats(uint64_t *mib, uint64_t *runs, double *split_ms, double *worst_ms, double *other_ms) {
     *mib=*runs=0; *split_ms=*worst_ms=*other_ms=0;
 }

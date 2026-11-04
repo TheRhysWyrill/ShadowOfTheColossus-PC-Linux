@@ -3,6 +3,7 @@
 
 #include "common/elf_info.h"
 #include "common/io_file.h"
+#include "common/path_util.h"
 #include "common/polyfill_thread.h"
 #include "common/thread.h"
 #include "core/emulator_settings.h"
@@ -187,7 +188,7 @@ static constexpr char PackMagic[8] = {'S', 'O', 'T', 'C', 'P', 'K', '1', '\0'};
 
 static void ReadCachePack(const std::filesystem::path& path,
                           std::map<std::string, std::vector<u8>>& out) {
-    std::FILE* f = _wfopen(path.c_str(), L"rb");
+    std::FILE* f = Common::FS::OpenNative(path, "rb");
     if (!f) {
         return;
     }
@@ -238,7 +239,7 @@ static void WriteCachePack(std::filesystem::path path,
                            std::vector<std::pair<std::string, std::vector<u8>>> files) {
     auto tmp = path;
     tmp += L".tmp";
-    std::FILE* f = _wfopen(tmp.c_str(), L"wb");
+    std::FILE* f = Common::FS::OpenNative(tmp, "wb");
     if (!f) {
         return;
     }

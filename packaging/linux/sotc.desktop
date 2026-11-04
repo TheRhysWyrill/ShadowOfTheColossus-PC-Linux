@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Shadow of the Colossus
+Comment=PC port of Shadow of the Colossus (bring your own game dump)
+Exec=AppRun
+Icon=sotc
+Categories=Game;
+Terminal=false
+StartupWMClass=sotc

@@ -27,13 +27,15 @@ using PAddr = uintptr_t;
 
 #define PS4_SYSV_ABI __attribute__((sysv_abi))
 
-// UDLs for memory size values
-constexpr unsigned long long operator""_KB(unsigned long long x) {
-    return 1024ULL * x;
+// UDLs for memory size values. u64, not unsigned long long: on Linux u64 is unsigned long and
+// VAddr is uintptr_t, so a literal of the other type breaks std::min/max and lambda return type
+// deduction (buffer_cache.cpp). On Windows the two types are the same.
+constexpr u64 operator""_KB(unsigned long long x) {
+    return static_cast<u64>(x) * 1024;
 }
-constexpr unsigned long long operator""_MB(unsigned long long x) {
-    return 1024_KB * x;
+constexpr u64 operator""_MB(unsigned long long x) {
+    return 1024_KB * static_cast<u64>(x);
 }
-constexpr unsigned long long operator""_GB(unsigned long long x) {
-    return 1024_MB * x;
+constexpr u64 operator""_GB(unsigned long long x) {
+    return 1024_MB * static_cast<u64>(x);
 }

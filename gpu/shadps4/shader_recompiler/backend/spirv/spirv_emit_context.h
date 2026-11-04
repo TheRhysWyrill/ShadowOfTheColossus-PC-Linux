@@ -340,14 +340,22 @@ public:
         std::array<Id, u32(PointerSize::NumClass)> offsets;
         std::array<BufferSpv, u32(PointerType::NumAlias)> aliases;
 
-        template <class Self>
-        auto& Alias(this Self& self, PointerType alias) {
-            return self.aliases[u32(alias)];
+        // Kept as plain const/non-const overloads rather than C++23 explicit object
+        // parameters: GCC 13 (Ubuntu 24.04, the AppImage build) rejects `this Self& self`.
+        auto& Alias(PointerType alias) {
+            return aliases[u32(alias)];
         }
 
-        template <class Self>
-        auto& Offset(this Self& self, PointerSize size) {
-            return self.offsets[u32(size)];
+        const auto& Alias(PointerType alias) const {
+            return aliases[u32(alias)];
+        }
+
+        auto& Offset(PointerSize size) {
+            return offsets[u32(size)];
+        }
+
+        const auto& Offset(PointerSize size) const {
+            return offsets[u32(size)];
         }
     };
 

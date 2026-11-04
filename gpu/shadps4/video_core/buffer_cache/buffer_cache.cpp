@@ -239,7 +239,7 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool as
     // other job workers wait for) got one readback, and one wait for the GPU, per 64 KiB. Each
     // fault just past the last window doubles this thread's window, up to SOTC_RB_STREAM_MAX_KB
     // (4096); a fault elsewhere starts over. Same data, same path, fewer waits.
-    static const u64 stream_max = [] {
+    static const u64 stream_max = []() -> u64 {
         const char* on = std::getenv("SOTC_RB_STREAM");
         if (!on || on[0] != '1') {
             return u64{0};

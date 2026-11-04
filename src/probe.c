@@ -1943,7 +1943,9 @@ int main(int argc, char **argv) {
 #endif
     if (sotc_cpu) apply_sotc_cpu_patches(sotc_cpu, segments, ns, size);
     if (sotc_cmdline) apply_sotc_cmdline(sotc_cmdline, size);
+#ifdef _WIN32
     if (sotc_cpu) { install_heap_hook(); install_pool_hook(); install_release_hook(); }
+#endif
     /* T38: the page pool release's VirtualQuery call (runtime_memory.c, SOTC_POOL_OWNER) */
     if (sotc_cpu && image[0x1ac7d]==0xE8) runtime_memory_set_release_site((uintptr_t)(image+0x1ac82));
     { void bb_set_guest_image(uintptr_t base); bb_set_guest_image((uintptr_t)image); }

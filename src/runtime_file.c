@@ -90,7 +90,7 @@ void runtime_file_unmount(const char *guest) {
 static char user_root[512]="user";
 /* sotc: the game update, as shadPS4 uses it: files of <app0>-UPDATE or <app0>-patch (or
  * SOTC_UPDATE_DIR) take the place of the base game's under /app0 and /hostapp. */
-static char update_root[512];
+static char update_root[600]; /* as long as path[] below: an update path is never cut */
 const char *runtime_file_update_dir(void) { return update_root; }
 const char *runtime_file_user_dir(void) { return user_root; }
 void runtime_file_configure(const char *app0,const char *user) {

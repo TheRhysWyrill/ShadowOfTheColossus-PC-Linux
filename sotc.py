@@ -3,9 +3,9 @@
 """Shadow of the Colossus (CUSA08809 EU 1.01 or CUSA08034 US 1.00) on PC: prepares the game image
 and starts it.
 
-    python sotc.py                      (or double-click SotC.bat)
+    python sotc.py                      (or double-click SotC.bat; on Linux, bash run.sh)
 
-Settings (environment variables, or sotc.ini beside this script as NAME=value lines):
+Settings (environment variables, or sotc.ini in the data folder as NAME=value lines):
     SOTC_GAME_DIR     the dumped game folder (the one with eboot.bin); default ../CUSA08809,
                       else ../CUSA08034
     SOTC_SYS_MODULES  folder with YOUR OWN console's decrypted libSceNgs2.sprx and
@@ -27,9 +27,12 @@ Settings (environment variables, or sotc.ini beside this script as NAME=value li
     BB_GAMEPAD        the gamepad to use (its name or part of it), when several are connected
     key.<input>=Keys, pad.<input>=buttons   remap the controls (README.md, Controles)
 The image is prepared again only when the game, the modules or the scripts change.
-Extra arguments go to bb-probe.exe. Run from a console, the session is also saved to
+Extra arguments go to bb-probe. Run from a console, the session is also saved to
 <user>/last_run.log (the 4 before it as last_run.1.log ... last_run.4.log; a crash's log is
 copied to <user>/crashes).
+SOTC_DATA_DIR moves what the port writes (the prepared image, <user>, sotc.ini: default, the
+port folder itself) elsewhere; the AppImage sets it to ~/.local/share/sotc, its mount being
+read-only.
 """
 import hashlib
 import os
@@ -39,6 +42,10 @@ import subprocess
 import sys
 
 PORT = Path(__file__).resolve().parent
+# Where the port writes (prepared image, saves, logs, sotc.ini). PORT itself on Windows and in a
+# source checkout; inside the AppImage PORT is a read-only squashfs mount, and AppRun points
+# SOTC_DATA_DIR at the user's data folder (~/.local/share/sotc).
+DATA = Path(os.environ.get('SOTC_DATA_DIR') or PORT)
 SCRIPTS = PORT / 'scripts'
 SYS_MODULES = ('libSceUlt.sprx', 'libSceNgs2.sprx')
 
@@ -49,8 +56,11 @@ def fail(message):
 
 
 def load_ini():
-    ini = PORT / 'sotc.ini'
-    if ini.is_file():
+    """NAME=value lines: the package's own sotc.ini first, the user's (in the data folder, which
+    keeps the launcher's key bindings) over it."""
+    for ini in dict.fromkeys((PORT / 'sotc.ini', DATA / 'sotc.ini')):
+        if not ini.is_file():
+            continue
         for line in ini.read_text(encoding='utf-8', errors='replace').splitlines():
             line = line.strip()
             if line and not line.startswith(('#', ';')) and '=' in line:
@@ -60,15 +70,19 @@ def load_ini():
 
 def no_console():
     """Started without a console (the launcher): console programs must not open their own."""
+    if os.name != 'nt':
+        return 0  # nothing opens a console on Linux
     import ctypes
     return 0 if ctypes.windll.kernel32.GetConsoleWindow() else subprocess.CREATE_NO_WINDOW
 
 
 def find_probe():
-    for candidate in (PORT / 'bin' / 'bb-probe.exe', PORT / 'out' / 'bb-probe.exe'):
+    """The loader: bin/ in a packaged build, out/ in a source checkout."""
+    suffix = '.exe' if os.name == 'nt' else ''
+    for candidate in (PORT / 'bin' / f'bb-probe{suffix}', PORT / 'out' / f'bb-probe{suffix}'):
         if candidate.is_file():
             return candidate
-    fail('bb-probe.exe not found: build it with build.sh (MSYS2 CLANG64) or use a packaged build.')
+    fail(f'bb-probe{suffix} not found: build it with build.sh or use a packaged build.')
 
 
 def run_script(name, *args):
@@ -128,8 +142,8 @@ def main():
     load_ini()
     env = os.environ
     os.chdir(PORT)
-    out = PORT / 'out'
-    out.mkdir(exist_ok=True)
+    out = DATA / 'out'
+    out.mkdir(parents=True, exist_ok=True)
     # The EU dump (CUSA08809) next to the port, else the US one (CUSA08034).
     default = next((PORT.parent / g for g in ('CUSA08809', 'CUSA08034') if (PORT.parent / g / 'eboot.bin').is_file()),
                    PORT.parent / 'CUSA08809')
@@ -217,15 +231,15 @@ def main():
 
     probe = find_probe()
     # Development builds run from the MSYS2 tree: its CLANG64 DLLs (SDL3, FFmpeg, ...).
-    if not (probe.parent / 'SDL3.dll').is_file():
+    if os.name == 'nt' and not (probe.parent / 'SDL3.dll').is_file():
         clang64 = Path(env.get('MSYS2_ROOT', r'C:\msys64')) / 'clang64' / 'bin'
         if clang64.is_dir():
             env['PATH'] = f'{clang64}{os.pathsep}{env.get("PATH", "")}'
-    user = Path(env.get('SOTC_USER_DIR', PORT / 'user')).resolve()
+    user = Path(env.get('SOTC_USER_DIR', DATA / 'user')).resolve()
     user.mkdir(parents=True, exist_ok=True)
     env.setdefault('BB_GPU_USER_DIR', str(user))
     # Controls: key.<input>= / pad.<input>= lines of sotc.ini remap keys and buttons (src/runtime_pad.c).
-    env.setdefault('BB_CONFIG', str(PORT / 'sotc.ini'))
+    env.setdefault('BB_CONFIG', str(DATA / 'sotc.ini'))
     command = [str(probe), str(out / 'boot-linked.bin'), '--content-profile', str(out / 'content.bin'),
                '--sotc-cpu', str(out / 'sotc-cpu.bin'), '--patches', str(out / 'patches.bin'),
                *(['--sotc-cmdline', str(out / 'cmdline.bin')] if (out / 'cmdline.bin').is_file() else []),

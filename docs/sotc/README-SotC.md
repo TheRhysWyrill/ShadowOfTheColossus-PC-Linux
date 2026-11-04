@@ -10,17 +10,34 @@ Este pacote **não contém o jogo nem firmware da Sony**. Você precisa ter os s
 
 ## Requisitos
 
-- Windows 10/11 64-bit e GPU com Vulkan 1.3.
+- Windows 10/11 64-bit ou Linux (AppImage), com GPU Vulkan 1.3.
 - Python não é necessário para o `SotC.exe`; só o `SotC.bat` precisa de
-  [Python 3](https://www.python.org/downloads/).
+  [Python 3](https://www.python.org/downloads/). No Linux, o AppImage já traz tudo.
 - O **seu dump** do jogo CUSA08809 ou CUSA08034 (pasta com `eboot.bin`, `sce_module`, `sce_sys`...).
 - Para ter som, `libSceNgs2.sprx` e `libSceUlt.sprx` do **seu próprio console**, decriptados.
   São os mesmos arquivos da pasta `user/sys_modules` do shadPS4; num PS4 com GoldHEN ficam em
   `/system/common/lib/` (FTP na porta 2121). Sem eles o jogo funciona, mas sem som.
 
+## Linux
+
+O pacote Linux é um AppImage (`SotC-x86_64.AppImage`), com o mesmo lançador deste documento:
+
+```
+chmod +x SotC-x86_64.AppImage
+./SotC-x86_64.AppImage
+```
+
+Precisa de glibc 2.39 ou mais novo (SteamOS 3.7, Bazzite/Fedora 42, Debian 13, Ubuntu 24.04 ou
+mais novo), Vulkan 1.3 e FUSE (sem FUSE: `--appimage-extract-and-run`). O AppImage é somente
+leitura: a imagem preparada do jogo, os saves, o cache de shaders, os logs e o `sotc.ini` ficam
+em `~/.local/share/sotc`. Para o Steam, adicione o AppImage como jogo não-Steam com `--play`
+nas opções de inicialização. O botão de atalho (Avançado) cria uma entrada `.desktop` na área de
+trabalho e no menu. DLSS e geração de quadros são só na versão Windows (o SDK Streamline da
+NVIDIA é só para Windows). Detalhes e diagnóstico: `README-Linux.txt`, no próprio pacote.
+
 ## Como jogar
 
-1. Abra `SotC.exe`, o lançador.
+1. Abra `SotC.exe` (no Windows) ou o `SotC-x86_64.AppImage` (no Linux), o lançador.
 2. Na primeira vez ele **procura sozinho** nos discos do PC:
    - a pasta do jogo (CUSA08809 ou CUSA08034);
    - os dois `.sprx` de som de um shadPS4 instalado (pasta `user/sys_modules`), que ele copia

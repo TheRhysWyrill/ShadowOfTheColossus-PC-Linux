@@ -1,6 +1,10 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 """sotc: launcher self-update from the port's GitHub releases.
 
+Windows downloads and installs SotC-PC.zip in place (this module's job). The Linux launcher
+only looks for the release of SotC-x86_64.AppImage and opens its page: an AppImage is a single
+file the player replaces, and the running one is a read-only mount.
+
 The launcher asks GitHub for the latest release (SOTC_UPDATE_URL replaces the API address, for
 tests: a file:// or http:// URL of the same JSON). When its tag is newer than the running
 version and the user agrees, SotC-PC.zip is downloaded to <port>/update/, checked (size, the
@@ -28,9 +32,13 @@ import time
 import urllib.request
 import zipfile
 
-RELEASES_URL = 'https://api.github.com/repos/AjncSystem/ShadowOfTheColossus-PC/releases/latest'
-RELEASES_PAGE = 'https://github.com/AjncSystem/ShadowOfTheColossus-PC/releases'
-ASSET_NAME = 'SotC-PC.zip'
+WINDOWS = os.name == 'nt'
+# The Windows build is the upstream port's; the Linux AppImage is published by this fork.
+RELEASES_URL = ('https://api.github.com/repos/AjncSystem/ShadowOfTheColossus-PC/releases/latest' if WINDOWS
+                else 'https://api.github.com/repos/TheRhysWyrill/ShadowOfTheColossus-PC-Linux/releases/latest')
+RELEASES_PAGE = ('https://github.com/AjncSystem/ShadowOfTheColossus-PC/releases' if WINDOWS
+                 else 'https://github.com/TheRhysWyrill/ShadowOfTheColossus-PC-Linux/releases')
+ASSET_NAME = 'SotC-PC.zip' if WINDOWS else 'SotC-x86_64.AppImage'
 TOP = 'SotC-PC'
 KEEP = ('user', 'update')  # top-level names an update never writes into
 USER_AGENT = 'SotC-PC-launcher'
@@ -74,7 +82,8 @@ def _open(url, timeout):
 
 
 def latest_release(timeout=10):
-    """The latest release with a SotC-PC.zip asset, as a dict, or None."""
+    """The latest release with this platform's asset (SotC-PC.zip, or the AppImage), as a dict,
+    or None."""
     with _open(os.environ.get('SOTC_UPDATE_URL') or RELEASES_URL, timeout) as response:
         data = json.load(response)
     asset = next((a for a in data.get('assets', []) if a.get('name') == ASSET_NAME), None)

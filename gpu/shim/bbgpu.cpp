@@ -4,7 +4,9 @@
 #include "bbport_settings.h"
 #include "bbport_copy.h"
 #ifndef _WIN32
+#include <sys/mman.h>
 #include <sys/resource.h>
+#include <unistd.h>
 #endif
 #include "bbport_toggles.h"
 #include "video_core/sotc_fps_cap.h"
@@ -133,6 +135,21 @@ static const bool kCopyLockOnce = [] {
     const char* v = std::getenv("SOTC_COPY_LOCK_ONCE");
     return v && v[0] == '1';
 }();
+static void PrefetchBacking(const u8* backing, u64 size) {
+#ifdef _WIN32
+    WIN32_MEMORY_RANGE_ENTRY range{const_cast<u8*>(backing), static_cast<SIZE_T>(size)};
+    PrefetchVirtualMemory(GetCurrentProcess(), 1, &range, 0);
+#else
+    const long page_size = sysconf(_SC_PAGESIZE);
+    if (page_size <= 0) {
+        return;
+    }
+    const uintptr_t mask = static_cast<uintptr_t>(page_size) - 1;
+    const uintptr_t first = reinterpret_cast<uintptr_t>(backing) & ~mask;
+    const uintptr_t last = (reinterpret_cast<uintptr_t>(backing) + size + mask) & ~mask;
+    madvise(reinterpret_cast<void*>(first), static_cast<size_t>(last - first), MADV_WILLNEED);
+#endif
+}
 static void CopySparseSerial(VAddr source, u8* dest, u64 size) {
     if (kCopyLockOnce && size && runtime_memory_copy_out(source, dest, size)) {
         return;
@@ -157,8 +174,7 @@ static void CopySparseSerial(VAddr source, u8* dest, u64 size) {
             return !v || v[0] != '0';
         }();
         if (backing && prefetch && n >= 256 * 1024) {
-            WIN32_MEMORY_RANGE_ENTRY range{const_cast<u8*>(backing), static_cast<SIZE_T>(n)};
-            PrefetchVirtualMemory(GetCurrentProcess(), 1, &range, 0);
+            PrefetchBacking(backing, n);
         }
         if (backing) std::memcpy(dest, backing, n);
         else if (mapped) std::memcpy(dest, reinterpret_cast<const void*>(source), n);

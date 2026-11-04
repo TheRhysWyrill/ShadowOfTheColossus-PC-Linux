@@ -17,8 +17,8 @@
 **Status: the game can be finished from start to end** (v0.60.3: played through the last
 colossus, the ending and the credits, with high quality textures, PS4 Pro mode and 60 FPS on).
 
-A native Windows port of the PS4 **Shadow of the Colossus** (Bluepoint, 2018; CUSA08809 EU 1.01 or
-CUSA08034 US 1.00) for **Windows 10/11**. The game's own x86-64 code runs directly on the PC's CPU and the PS4 GPU
+A native port of the PS4 **Shadow of the Colossus** (Bluepoint, 2018; CUSA08809 EU 1.01 or
+CUSA08034 US 1.00) for **Windows 10/11** and **Linux** (AppImage). The game's own x86-64 code runs directly on the PC's CPU and the PS4 GPU
 is translated to Vulkan. It is not a full emulator: it is a loader with the system functions the
 game needs, in the style of [bloodborne_pc](https://github.com/Supermedo/bloodborne_pc).
 
@@ -135,6 +135,21 @@ Requirements: Windows 10/11 64-bit and a **Vulkan 1.3** GPU (NVIDIA, AMD or Inte
 driver). No Python install needed. **The game folder should be on an SSD** (NVMe best): on a hard
 disk new areas stutter much more.
 
+**Linux (AppImage).** Download `SotC-x86_64.AppImage` from [Releases](../../releases), then:
+
+```
+chmod +x SotC-x86_64.AppImage
+./SotC-x86_64.AppImage                 # the launcher; --play starts the game directly
+```
+
+It needs glibc 2.39 or newer (SteamOS 3.7, Bazzite/Fedora 42, Debian 13, Ubuntu 24.04 or
+newer), Vulkan 1.3 and FUSE (without FUSE: `--appimage-extract-and-run`). The same launcher
+opens; the prepared game image, saves, shader caches, logs and `sotc.ini` live in
+`~/.local/share/sotc` (`SOTC_DATA_DIR` moves them), since the AppImage itself is read-only.
+For Steam, add the AppImage as a non-Steam game with `--play` as its launch option. DLSS and
+frame generation are Windows-only (NVIDIA's Streamline SDK). The package's `README-Linux.txt`
+has the details, troubleshooting included.
+
 | What | Where from | What for |
 |---|---|---|
 | CUSA08809 (EU 1.01) or CUSA08034 (US 1.00) game dump | your PS4, through GoldHEN | the game |
@@ -149,7 +164,8 @@ and only DLC of the same region is used.
 Game library and automatic search, shadPS4 save import, 720p–4K output (the game renders at
 1080p, upscaled with FSR 1 + RCAS), PS4 Pro mode, 60 FPS and 16x AF modes, controller support
 (DualShock 4, DualSense, Xbox) with mouse camera, key remapping, Bluepoint engine cvars, desktop
-shortcut and a session log in `user/last_run.log`.
+shortcut (a `.desktop` entry on Linux, in the menu and on the desktop) and a session log in
+`user/last_run.log`.
 
 In 60 FPS mode the title-screen attract demo averages ~67 FPS on an RTX 2060 SUPER, with
 29–34 FPS in its heaviest section. Vulkan only (no DirectX). AMD and Intel can enable the
@@ -171,6 +187,18 @@ Python with PyInstaller and Pillow (`WINPYTHON`).
 bash build.sh                              # out/bb-probe.exe
 bash packaging/windows/package_sotc.sh     # dist/SotC-PC.zip
 ```
+
+Linux (Ubuntu 24.04; elsewhere `nix-shell shell.nix`):
+
+```
+bash packaging/linux/ci-deps.sh             # once: SDL3, Vulkan headers and VMA 24.04 lacks
+bash build.sh                              # out/bb-probe, out/gpu/libbbgpu.so
+PATH="$PWD/out/venv/bin:$PATH" bash packaging/linux/build.sh   # dist/SotC-x86_64.AppImage
+```
+
+The release build runs in [.github/workflows/linux-appimage.yml](.github/workflows/linux-appimage.yml)
+on Ubuntu 24.04, so the AppImage asks for glibc 2.39 and no more, and opens on Debian 13, Fedora
+42, Arch and openSUSE before it is published.
 
 Packaging refuses any `.sprx`/`.prx`: Sony firmware never goes into the package. Test tools:
 `tools/`. Diagnostic variables: [docs/sotc/README-SotC.md](docs/sotc/README-SotC.md).

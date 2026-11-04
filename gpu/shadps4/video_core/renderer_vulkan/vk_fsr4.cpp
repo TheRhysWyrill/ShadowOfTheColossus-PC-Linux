@@ -2,6 +2,8 @@
 
 #include "video_core/renderer_vulkan/vk_fsr4.h"
 
+#ifdef _WIN32
+
 #include <windows.h>
 
 #include <algorithm>
@@ -285,3 +287,30 @@ bool Dispatch(VkCommandBuffer cmdbuf, const Params& p) {
 }
 
 } // namespace Vulkan::Fsr4
+
+#else // !_WIN32
+
+// The official AMD FidelityFX loader is a Windows DLL interface. Keep the shared interface
+// linkable on Linux without pulling the Windows SDK into the build; the renderer falls back to
+// its existing upscalers.
+namespace Vulkan::Fsr4 {
+
+bool Init(const Instance&) {
+    return false;
+}
+
+bool Available() {
+    return false;
+}
+
+const char* Name() {
+    return "FSR";
+}
+
+bool Dispatch(VkCommandBuffer, const Params&) {
+    return false;
+}
+
+} // namespace Vulkan::Fsr4
+
+#endif // _WIN32

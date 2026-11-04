@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-or-later
-"""Shadow of the Colossus launcher for Windows (Tkinter), modelled on bbport_launcher_win.py.
+"""Shadow of the Colossus launcher (Tkinter), for Windows and Linux, modelled on
+bbport_launcher_win.py.
 
 One window for the port's settings: the game dump, the user's own sound modules, saves, modes
 (16x AF, 60 FPS), display and diagnostics. They go to sotc.py as environment variables.
-Launcher options live in %APPDATA%/sotc-launcher/settings.json.
+Launcher options live in the port's user folder (<port>/user/launcher_settings.json; inside the
+AppImage, $XDG_DATA_HOME/sotc/user).
 
-Frozen with PyInstaller (packaging/windows/package_sotc.sh) the same SotC.exe also runs the
-game without the window (`--play`), sotc.py (`--run`) and the preparation scripts (`--script`),
-so a packaged port needs no Python installation.
+Frozen with PyInstaller (packaging/windows/package_sotc.sh, packaging/linux/build.sh) the same
+executable also runs the game without the window (`--play`), sotc.py (`--run`) and the
+preparation scripts (`--script`), so a packaged port needs no Python installation.
 """
 import ctypes
 import json
@@ -18,13 +20,17 @@ from pathlib import Path
 import queue
 import runpy
 import shutil
+import signal
 import subprocess
 import sys
 import threading
 import time
 import zipfile
 
-import sotc_frame
+WINDOWS = os.name == 'nt'
+if WINDOWS:
+    import sotc_frame
+
 import sotc_hardware
 import sotc_pad
 import sotc_search
@@ -34,14 +40,21 @@ import sotc_update
 FROZEN = getattr(sys, 'frozen', False)
 PORT_DIR = Path(sys.executable).resolve().parent if FROZEN else Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PORT_DIR / 'scripts'))
+# Where the port writes. PORT_DIR on Windows and in a source checkout; the AppImage's mount is
+# read-only, so its AppRun sets SOTC_DATA_DIR (~/.local/share/sotc) instead.
+DATA_DIR = Path(os.environ.get('SOTC_DATA_DIR') or PORT_DIR)
 # Settings of the copy the launcher runs from, in its user folder (kept by updates): each copy
 # of the port has its own saves, caches and logs. Before 0.59.2 every copy shared
 # %APPDATA%\sotc-launcher\settings.json, so a new copy went on using the data folder of the one
 # set up first.
-LEGACY_CONFIG_DIR = Path(os.environ.get('APPDATA', Path.home())) / 'sotc-launcher'
+LEGACY_CONFIG_DIR = (Path(os.environ.get('APPDATA', Path.home())) / 'sotc-launcher' if WINDOWS else
+                     Path(os.environ.get('XDG_CONFIG_HOME') or Path.home() / '.config') / 'sotc-launcher')
 LEGACY_CONFIG_FILE = LEGACY_CONFIG_DIR / 'settings.json'
-CONFIG_DIR = PORT_DIR / 'user'
+CONFIG_DIR = DATA_DIR / 'user'
 CONFIG_FILE = CONFIG_DIR / 'launcher_settings.json'
+# The AppImage's own file: what to restart and what a shortcut must start (the mount point in
+# $PORT_DIR changes on every launch).
+APPIMAGE = os.environ.get('APPIMAGE') or ''
 # The supported releases (title ID -> region, version) share one eboot build; scripts/ is on
 # sys.path above. The EU one (CUSA08809) is the default game folder.
 from sotc_modes import GAMES  # noqa: E402
@@ -57,6 +70,13 @@ NO_WINDOW = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
 
 def attach_stdio():
     """A windowed executable starts without sys.stdout; inherited pipes or a console still exist."""
+    if not WINDOWS:
+        for name in ('stdout', 'stderr'):
+            if getattr(sys, name) is None:
+                setattr(sys, name, open(os.devnull, 'w'))
+        for name in ('stdout', 'stderr'):
+            setattr(sys, name, _TolerantStream(getattr(sys, name)))
+        return
     import msvcrt
     for name, std in (('stdout', -11), ('stderr', -12)):
         if getattr(sys, name) is not None:
@@ -124,6 +144,12 @@ def run_command():
     return [sys.executable, '--run'] if FROZEN else [sys.executable, str(PORT_DIR / 'sotc.py')]
 
 
+def spawn_options():
+    """Popen flags for the game: no console window on Windows, its own process group elsewhere
+    (Stop then ends everything the launch started)."""
+    return {'start_new_session': True} if not WINDOWS else {'creationflags': NO_WINDOW}
+
+
 # ---------------------------------------------------------------------------------------------
 # Texts: Portuguese first, English for every other Windows language.
 
@@ -147,16 +173,38 @@ sotc_search._ = sotc_pad._ = _  # their texts in the launcher's language
 
 
 def ui_font():
-    """Interface font: Inter (sotc_theme), which, like Segoe UI, has no Chinese or Korean characters."""
-    return {'zh': 'Microsoft YaHei UI', 'ko': 'Malgun Gothic'}.get(LANG, theme.BODY)
+    """Interface font: Inter (sotc_theme); Chinese and Korean use system fonts."""
+    if LANG == 'zh':
+        return 'Noto Sans CJK SC' if not WINDOWS else 'Microsoft YaHei UI'
+    if LANG == 'ko':
+        return 'Noto Sans CJK KR' if not WINDOWS else 'Malgun Gothic'
+    return theme.BODY if WINDOWS or theme.BODY != 'Segoe UI' else 'DejaVu Sans'
 
 
 def title_font():
-    """Titles: Cinzel (sotc_theme) for Latin and Cyrillic-free text; Russian keeps Georgia."""
-    return {'zh': 'Microsoft YaHei UI', 'ko': 'Malgun Gothic', 'ru': 'Georgia'}.get(LANG, theme.HEAD)
+    """Titles: Cinzel (sotc_theme); Russian and CJK use fonts with those glyphs."""
+    if LANG == 'ru':
+        return 'Georgia' if WINDOWS else 'DejaVu Serif'
+    if LANG == 'zh':
+        return 'Noto Sans CJK SC' if not WINDOWS else 'Microsoft YaHei UI'
+    if LANG == 'ko':
+        return 'Noto Sans CJK KR' if not WINDOWS else 'Malgun Gothic'
+    return theme.HEAD if WINDOWS or theme.HEAD != 'Georgia' else 'DejaVu Serif'
 
 
-def windows_language():
+def log_font():
+    return ('Consolas' if WINDOWS else 'DejaVu Sans Mono', 9)
+
+
+def system_language():
+    """Portuguese, Spanish, Chinese, Korean or Russian on those systems, else English. Windows
+    reports a language ID; elsewhere the locale environment (LC_ALL, LC_MESSAGES, LANG)."""
+    if not WINDOWS:
+        for name in ('LC_ALL', 'LC_MESSAGES', 'LANG'):
+            code = os.environ.get(name, '').split('.')[0].split('_')[0].lower()
+            if code:
+                return {'pt': 'pt', 'es': 'es', 'zh': 'zh', 'ko': 'ko', 'ru': 'ru'}.get(code, 'en')
+        return 'en'
     try:
         primary = ctypes.windll.kernel32.GetUserDefaultUILanguage() & 0x3ff
     except (AttributeError, OSError):
@@ -164,10 +212,34 @@ def windows_language():
     return {0x16: 'pt', 0x0a: 'es', 0x04: 'zh', 0x12: 'ko', 0x19: 'ru'}.get(primary, 'en')
 
 
+def host_environment():
+    """The user's session environment, for programs outside the port (xdg-open): the AppImage's
+    library paths would replace the desktop's own."""
+    env = dict(os.environ)
+    for name in ('LD_LIBRARY_PATH', 'LD_PRELOAD', 'PYTHONHOME', 'PYTHONPATH', 'TCL_LIBRARY', 'TK_LIBRARY'):
+        env.pop(name, None)
+    return env
+
+
+def open_url(url):
+    """The browser: the system's on Windows, xdg-open elsewhere."""
+    if WINDOWS:
+        os.startfile(url)
+        return
+    try:
+        subprocess.Popen(['xdg-open', url], env=host_environment(), stdin=subprocess.DEVNULL,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except OSError:
+        pass
+
+
 # ---------------------------------------------------------------------------------------------
 # Settings, passed to sotc.py as environment variables.
 
-APP_DEFAULTS = {'ui_language': '', 'game_dir': str(PORT_DIR.parent / GAME_ID), 'sys_modules': '',
+# Inside the AppImage the mount point says nothing about where dumps are: ~/Games is the usual
+# place on Linux, and the first start's search finds the game anyway.
+GAME_ROOT = Path.home() / 'Games' if APPIMAGE else PORT_DIR.parent
+APP_DEFAULTS = {'ui_language': '', 'game_dir': str(GAME_ROOT / GAME_ID), 'sys_modules': '',
                 'user_dir': '', 'af16': True, 'textures': 'high', 'window_icon_file': '', 'fps60': False, 'fps_mode': '30', 'button_icons': 'ps', 'fullscreen': False,
                 'present_mode': 'Mailbox', 'language': '', 'player_name': '', 'show_fps': False,
                 'readbacks': '', 'extra_env': '', 'debug_menu': False, 'debug_watch': False, 'rb_hot': True, 'skip_logos': True, 'skip_film': False, 'close_on_play': False, 'gamepad': '', 'rumble': True,
@@ -306,10 +378,23 @@ def sdl_key_name(keysym):
     return None
 
 
+def user_ini():
+    """sotc.ini of this copy (settings and key bindings, passed as BB_CONFIG): inside the AppImage
+    the package's own is read-only, so the data folder keeps one, starting as a copy of it."""
+    ini = DATA_DIR / 'sotc.ini'
+    packaged = PORT_DIR / 'sotc.ini'
+    if ini != packaged and not ini.is_file() and packaged.is_file():
+        try:
+            shutil.copy2(packaged, ini)
+        except OSError:
+            return packaged
+    return ini
+
+
 def write_key_bindings(keys):
     """The launcher's key bindings as key.<input>= lines of sotc.ini (BB_CONFIG), replacing its
     earlier ones; other lines stay."""
-    ini = PORT_DIR / 'sotc.ini'
+    ini = user_ini()
     try:
         lines = ini.read_text(encoding='utf-8').splitlines()
     except OSError:
@@ -360,6 +445,11 @@ FRAMEGEN = [('off', ('Desligada', 'Off')),
             ('auto', ('Automática (DLSS-G ou FSR 3, experimental)', 'Automatic (DLSS-G or FSR 3, experimental)')),
             ('dlss', ('NVIDIA DLSS-G (RTX 40/50)', 'NVIDIA DLSS-G (RTX 40/50)')),
             ('fsr', ('AMD FSR 3 (qualquer placa)', 'AMD FSR 3 (any GPU)'))]
+if not WINDOWS:
+    # Streamline (DLSS, DLSS-G) is a Windows SDK, and the motion vectors FSR 3 frame generation
+    # needs are captured by the same code: neither is available in the Linux build.
+    UPSCALERS = [option for option in UPSCALERS if option[0] != 'dlss']
+    FRAMEGEN = [('off', ('Desligada', 'Off'))]
 # DLSS super resolution (bb-probe: SOTC_UPSCALER=dlss): the game renders at the output size
 # divided by the mode's factor and DLSS picks its mode from that ratio (vk_dlssg.cpp).
 DLSS_MODES = [('quality', ('Qualidade (1,5×)', 'Quality (1.5×)')),
@@ -475,7 +565,7 @@ def user_dir(s):
     """The data folder (saves in savedata/1/<title id> below it: CUSA08809 EU, CUSA08034 US). A
     folder picked one level too deep (savedata itself, or a save folder) is taken back up to the
     data folder."""
-    folder = Path(s.get('user_dir') or PORT_DIR / 'user')
+    folder = Path(s.get('user_dir') or DATA_DIR / 'user')
     parts = [p.lower() for p in folder.parts]
     if 'savedata' in parts:
         folder = Path(*folder.parts[:len(parts) - 1 - parts[::-1].index('savedata')])
@@ -620,6 +710,16 @@ def _shortcut_script(play, frozen, executable, port_dir, game_icon):
             + (f'$s.Arguments={_ps_quote(arguments)};' if arguments else '') + '$s.Save()')
 
 
+def desktop_entry(name, command, icon):
+    """A .desktop entry (the Linux shortcut): the command may carry --play, the icon is a PNG.
+    StartupWMClass is the name the launcher gives its window ('sotc')."""
+    return ('[Desktop Entry]\nType=Application\n'
+            f'Name={name}\n'
+            'Comment=PC port of Shadow of the Colossus (bring your own game dump)\n'
+            f'Exec={command}\nIcon={icon}\nTerminal=false\nCategories=Game;\n'
+            'StartupWMClass=sotc\n')
+
+
 def load_settings():
     """Saved settings over the defaults. Older settings that turned DLSS-G on with SOTC_DLSSG=1 in
     the extra variables get the frame generation setting instead."""
@@ -633,7 +733,7 @@ def load_settings():
             saved['user_dir'] = ''
             # Its saves and the user's sound modules come along (copied; the old copy keeps them).
             for name in ('savedata', 'sys_modules'):
-                source, target = old / name, PORT_DIR / 'user' / name
+                source, target = old / name, DATA_DIR / 'user' / name
                 if source.is_dir() and not target.exists():
                     try:
                         shutil.copytree(source, target)
@@ -657,6 +757,11 @@ def load_settings():
         if 'SOTC_DLSSG=1' in extra:
             settings['framegen'] = 'auto'
             settings['extra_env'] = ' '.join(item for item in extra if item != 'SOTC_DLSSG=1')
+    if not WINDOWS:
+        # Settings copied from a Windows install: both options are Windows-only (vk_dlssg.cpp).
+        if settings.get('upscaler') == 'dlss':
+            settings['upscaler'] = 'fsr1'
+        settings['framegen'] = 'off'
     return settings
 
 
@@ -805,7 +910,8 @@ def game_environment(s):
     env['SOTC_NEO'] = '1' if s.get('neo') and not is_wide(env['SOTC_OUTPUT_RES']) else '0'
     if s.get('neo') and env['SOTC_NEO'] == '0':
         env['SOTC_NOTE'] = f"{env['SOTC_OUTPUT_RES']} is wider than 16:9: PS4 Pro mode off (it renders 16:9 only)"
-    env['SOTC_FRAMEGEN'] = s.get('framegen') or 'off'
+    if WINDOWS:
+        env['SOTC_FRAMEGEN'] = s.get('framegen') or 'off'
     if s.get('fg_hudless'):  # Lucas-blip-png's option (#206, #210)
         env['SOTC_FG_HUDLESS'] = '1'
     # sotc: high quality textures: the texture banks sampled since the last report read as sampled
@@ -836,11 +942,13 @@ def game_environment(s):
         env.setdefault('SOTC_LOD_POOL_LOW', '0')
     if s.get('button_icons') == 'xbox' and (PORT_DIR / 'glyphs' / 'xbox').is_dir():
         env['SOTC_TEX_REPLACE'] = str(PORT_DIR / 'glyphs' / 'xbox')
-    env['SOTC_UI_LANG'] = s.get('ui_language') or windows_language()  # overlay and F7/F8 texts
+    env['SOTC_UI_LANG'] = s.get('ui_language') or system_language()  # overlay and F7/F8 texts
     # The game renders at the output size. 720p renders at 1080p, as on PS4; the PS4 Pro path keeps
     # its own sizes.
     output = env['SOTC_OUTPUT_RES']
     upscaler = s.get('upscaler', 'fsr1')
+    if not WINDOWS and upscaler == 'dlss':
+        upscaler = 'fsr1'  # settings copied from a Windows install may ask for DLSS
     if upscaler in ('dlss', 'fsr4') and env['SOTC_NEO'] == '0':
         env['SOTC_RENDER_RES'] = dlss_render(output, s.get('dlss_mode'))
     elif output not in ('1280x720', '1920x1080') and env['SOTC_NEO'] == '0':
@@ -880,7 +988,7 @@ def game_environment(s):
         env['BB_GAMEPAD'] = str(s['gamepad']).strip()
     if not s.get('rumble', True):
         env['SOTC_RUMBLE'] = '0'
-    env['BB_CONFIG'] = str(PORT_DIR / 'sotc.ini')
+    env['BB_CONFIG'] = str(user_ini())
     for item in str(s['extra_env']).split():
         item = item.strip().lstrip('=')  # "=KEY=1" typed by mistake still sets KEY
         if '=' in item:
@@ -920,6 +1028,8 @@ def shadps4_saves(serial):
     """Save folders of the game serial in shadPS4 installations next to the port or in the usual
     places."""
     roots = [PORT_DIR.parent, Path.home(), Path(os.environ.get('APPDATA', Path.home()))]
+    if not WINDOWS:
+        roots.append(Path(os.environ.get('XDG_DATA_HOME') or Path.home() / '.local' / 'share'))
     found = []
     for root in roots:
         for pattern in ('*/user/home/*/savedata/' + serial, '*/*/user/home/*/savedata/' + serial,
@@ -1000,20 +1110,31 @@ class Launcher(sotc_search.SearchMixin, sotc_pad.PadMixin):
             return
         except (ImportError, OSError):
             pass
-        try:
-            self.root.iconbitmap(default=str(PORT_DIR / 'launcher' / 'sotc.ico'))
-        except self.tk.TclError:
-            pass
+        if WINDOWS:
+            try:
+                self.root.iconbitmap(default=str(PORT_DIR / 'launcher' / 'sotc.ico'))
+            except self.tk.TclError:
+                pass
+        else:  # Tk reads PNGs, not .ico files
+            try:
+                self.icon = self.tk.PhotoImage(file=str(PORT_DIR / 'launcher' / 'sotc.png'))
+                self.root.iconphoto(True, self.icon)
+            except self.tk.TclError:
+                pass
 
     def game_icon_file(self):
-        """icon0.png of the dump as an .ico in the data folder (for the desktop shortcut)."""
+        """icon0.png of the dump in the data folder, for the desktop shortcut (.ico on Windows,
+        .png on Linux: a .desktop entry names a PNG)."""
         try:
             from PIL import Image
-            target = user_dir(self.app) / 'game.ico'
+            target = user_dir(self.app) / ('game.ico' if WINDOWS else 'game.png')
             with Image.open(Path(self.app['game_dir']) / 'sce_sys' / 'icon0.png') as source:
                 target.parent.mkdir(parents=True, exist_ok=True)
-                source.convert('RGBA').save(target, sizes=[(16, 16), (32, 32), (48, 48), (64, 64), (128, 128),
-                                                           (256, 256)])
+                if WINDOWS:
+                    source.convert('RGBA').save(target, sizes=[(16, 16), (32, 32), (48, 48), (64, 64),
+                                                               (128, 128), (256, 256)])
+                else:
+                    source.convert('RGBA').resize((256, 256), Image.LANCZOS).save(target)
             return target
         except (ImportError, OSError):
             return None
@@ -1163,7 +1284,9 @@ class Launcher(sotc_search.SearchMixin, sotc_pad.PadMixin):
     def build(self):
         tk, ttk = self.tk, self.ttk
         self.custom_frame, self.tray = None, None
-        self.titlebar = None if self.app.get('windows_title_bar') else self.build_titlebar()
+        self.titlebar = None
+        if WINDOWS and not self.app.get('windows_title_bar'):
+            self.titlebar = self.build_titlebar()
         self.root.bind('<Unmap>', self.minimized, add='+')
         side = tk.Frame(self.root, bg=BG, width=self.px(220))
         side.pack(side='left', fill='y')
@@ -1171,7 +1294,7 @@ class Launcher(sotc_search.SearchMixin, sotc_pad.PadMixin):
         tk.Label(side, text='SHADOW OF\nTHE COLOSSUS', bg=BG, fg=GOLD, font=(title_font(), 16), justify='left').pack(
             anchor='w', padx=22, pady=(26, 0))
         tk.Frame(side, bg=GOLD, height=1, width=self.px(46)).pack(anchor='w', padx=22, pady=(10, 8))
-        tk.Label(side, text=_('port nativo · Windows', 'native port · Windows') + f'  ·  v{VERSION}', bg=BG, fg=MUTED,
+        tk.Label(side, text=_('port nativo', 'native port') + f' · {platform.system()}  ·  v{VERSION}', bg=BG, fg=MUTED,
                  font=(ui_font(), 9)).pack(anchor='w', padx=22, pady=(0, 14))
         self.page_titles = {}
         self.build_search(side)
@@ -1349,6 +1472,8 @@ class Launcher(sotc_search.SearchMixin, sotc_pad.PadMixin):
 
     def window_chrome(self):
         """Windows' caption off (sotc_frame), the frame dark; Windows' caption back when that fails."""
+        if not WINDOWS:
+            return
         try:
             hwnd = int(self.root.wm_frame(), 16)
             if hwnd == self.root.winfo_id() and getattr(self, 'chrome_waits', 0) < 100:
@@ -1433,7 +1558,8 @@ class Launcher(sotc_search.SearchMixin, sotc_pad.PadMixin):
         self.row(quick, _('Saída', 'Output'), self.choice(quick, 'output_res', OUTPUTS, 24))
         self.row(quick, _('Upscaler', 'Upscaler'), self.choice(quick, 'upscaler', UPSCALERS, 24))
         self.row(quick, _('Nitidez (RCAS)', 'Sharpening (RCAS)'), self.choice(quick, 'sharpness', SHARPNESS, 24))
-        self.row(quick, _('Geração de quadros', 'Frame generation'), self.choice(quick, 'framegen', FRAMEGEN, 24))
+        if WINDOWS:
+            self.row(quick, _('Geração de quadros', 'Frame generation'), self.choice(quick, 'framegen', FRAMEGEN, 24))
         self.row(quick, _('FPS', 'FPS'), self.choice(quick, 'fps_mode', FPS_MODES, 24))
         self.row(quick, _('Texturas', 'Textures'), self.choice(quick, 'textures', TEXTURES, 24))
         self.check(quick, 'af16', _('Texturas nítidas (filtro 16x)', 'Sharp textures (16x filtering)'))
@@ -1606,27 +1732,33 @@ class Launcher(sotc_search.SearchMixin, sotc_pad.PadMixin):
                    'most 60 (40 to 60 depending on the area, with a fast CPU). Unlimited: above 60 on fast '
                    'screens. Without the cap some scenes may behave differently. In game, F7 turns the 30 FPS '
                    'cap on and off at any time.'))
-        self.row(f, _('Geração de quadros', 'Frame generation'), self.choice(f, 'framegen', FRAMEGEN),
-                 _('Uma imagem gerada entre duas do jogo: com 30 FPS (limite ligado) a tela mostra 60. DLSS-G: '
-                   'NVIDIA RTX 40/50. FSR 3: qualquer placa (RTX 20/30, AMD, Intel). Automática: DLSS-G se a '
-                   'placa tiver, senão FSR 3. Experimental: só faz diferença com o modo 60 FPS desligado, e a '
-                   'barra de vida e de stamina pode tremer (a imagem gerada inclui a interface). '
-                   'No jogo, F8 troca o modo (desligada, DLSS-G, FSR 3). Melhor com '
-                   'a tela a 60 ou 120 Hz, ou G-SYNC/FreeSync.',
-                   'One generated frame between two game frames: at 30 FPS (capped) the screen shows '
-                   '60. DLSS-G: NVIDIA RTX 40/50. FSR 3: any GPU (RTX 20/30, AMD, Intel). Automatic: DLSS-G when '
-                   'the GPU has it, else FSR 3. Experimental: it only matters with the 60 FPS mode off, and the '
-                   'health and stamina bars may shake (the generated frame includes the interface). '
-                   'In game, F8 switches the mode (off, DLSS-G, FSR 3). Best with the '
-                   'screen at 60 or 120 Hz, or G-SYNC/FreeSync.'))
-        self.check(f, 'fg_hudless', _('Geração de quadros sem a interface (experimental)',
-                                      'Frame generation without the interface (experimental)'),
-                   _('Gera os quadros intermediários só com a cena e põe a interface por cima, sem interpolá-la: '
-                     'tira o tremor das barras de vida e stamina e das letras. Pode desbotar o logo na tela '
-                     'de título e mostrar a cena antiga atrás das telas de carregamento.',
-                     'Generates the in-between frames from the scene only and draws the interface on top, '
-                     'uninterpolated: removes the shaking health/stamina bars and text. It can fade the '
-                     'logo on the title screen and show the old scene behind loading screens.'))
+        if WINDOWS:
+            self.row(f, _('Geração de quadros', 'Frame generation'), self.choice(f, 'framegen', FRAMEGEN),
+                     _('Uma imagem gerada entre duas do jogo: com 30 FPS (limite ligado) a tela mostra 60. DLSS-G: '
+                       'NVIDIA RTX 40/50. FSR 3: qualquer placa (RTX 20/30, AMD, Intel). Automática: DLSS-G se a '
+                       'placa tiver, senão FSR 3. Experimental: só faz diferença com o modo 60 FPS desligado, e a '
+                       'barra de vida e de stamina pode tremer (a imagem gerada inclui a interface). '
+                       'No jogo, F8 troca o modo (desligada, DLSS-G, FSR 3). Melhor com '
+                       'a tela a 60 ou 120 Hz, ou G-SYNC/FreeSync.',
+                       'One generated frame between two game frames: at 30 FPS (capped) the screen shows '
+                       '60. DLSS-G: NVIDIA RTX 40/50. FSR 3: any GPU (RTX 20/30, AMD, Intel). Automatic: DLSS-G when '
+                       'the GPU has it, else FSR 3. Experimental: it only matters with the 60 FPS mode off, and the '
+                       'health and stamina bars may shake (the generated frame includes the interface). '
+                       'In game, F8 switches the mode (off, DLSS-G, FSR 3). Best with the '
+                       'screen at 60 or 120 Hz, or G-SYNC/FreeSync.'))
+            self.check(f, 'fg_hudless', _('Geração de quadros sem a interface (experimental)',
+                                          'Frame generation without the interface (experimental)'),
+                       _('Gera os quadros intermediários só com a cena e põe a interface por cima, sem interpolá-la: '
+                         'tira o tremor das barras de vida e stamina e das letras. Pode desbotar o logo na tela '
+                         'de título e mostrar a cena antiga atrás das telas de carregamento.',
+                         'Generates the in-between frames from the scene only and draws the interface on top, '
+                         'uninterpolated: removes the shaking health/stamina bars and text. It can fade the '
+                         'logo on the title screen and show the old scene behind loading screens.'))
+        else:
+            self.note(f, _('Geração de quadros e DLSS: só na versão Windows (Streamline, o SDK da NVIDIA). '
+                           'Aqui a imagem é ampliada com FSR 1.',
+                           'Frame generation and DLSS: Windows only (Streamline, NVIDIA\'s SDK). Here the image '
+                           'is enlarged with FSR 1.'), top=8)
         self.window_icon_row(f)
         self.section(f, _('Resolução', 'Resolution'))
         self.row(f, _('Saída', 'Output'), self.choice(f, 'output_res', OUTPUTS),
@@ -1931,11 +2063,12 @@ class Launcher(sotc_search.SearchMixin, sotc_pad.PadMixin):
         ttk.Button(holder, text=_('Limpar cache de shaders', 'Clear shader cache'), command=self.clear_cache).pack(side='left', padx=(6, 0))
         self.section(f, _('Diagnóstico', 'Diagnostics'))
         self.check(f, 'show_fps', _('FPS no registro (a cada 5 s)', 'FPS in the log (every 5 s)'))
-        self.check(f, 'dlss_compare', _('Comparar DLSS com FSR 1 (F9)', 'Compare DLSS with FSR 1 (F9)'),
-                   _('Com o upscaler DLSS: F9 no jogo troca entre DLSS e FSR 1, e o upscaler em uso aparece no '
-                     'canto superior direito.',
-                     'With the DLSS upscaler: F9 in game switches between DLSS and FSR 1, and the upscaler in '
-                     'use shows in the top right corner.'))
+        if WINDOWS:
+            self.check(f, 'dlss_compare', _('Comparar DLSS com FSR 1 (F9)', 'Compare DLSS with FSR 1 (F9)'),
+                       _('Com o upscaler DLSS: F9 no jogo troca entre DLSS e FSR 1, e o upscaler em uso aparece no '
+                         'canto superior direito.',
+                         'With the DLSS upscaler: F9 in game switches between DLSS and FSR 1, and the upscaler in '
+                         'use shows in the top right corner.'))
         self.row(f, _('Leituras da GPU', 'GPU readbacks'), self.choice(f, 'readbacks', READBACKS))
         self.row(f, _('Cvars do motor', 'Engine cvars'), ttk.Entry(f, textvariable=self.var('engine_cvars'), width=58),
                  _('Avançado: NOME=valor separados por espaço, acrescentados à linha de comando do jogo.',
@@ -1954,7 +2087,7 @@ class Launcher(sotc_search.SearchMixin, sotc_pad.PadMixin):
         ttk.Button(top, text=_('Copiar', 'Copy'), command=self.copy_log).pack(side='right')
         ttk.Button(top, text=_('Limpar', 'Clear'), command=lambda: self.set_log('')).pack(side='right', padx=6)
         self.log = tk.Text(page, wrap='none', bg='#090a0b', fg='#c9ccd0', insertbackground=TEXT, relief='flat',
-                           font=('Consolas', 9), padx=8, pady=6, state='disabled', highlightthickness=0)
+                           font=log_font(), padx=8, pady=6, state='disabled', highlightthickness=0)
         bar = ttk.Scrollbar(page, command=self.log.yview)
         self.log.configure(yscrollcommand=bar.set)
         bar.pack(side='right', fill='y')
@@ -2022,11 +2155,14 @@ class Launcher(sotc_search.SearchMixin, sotc_pad.PadMixin):
         return '   ·   '.join(parts)
 
     def detect_gpu(self):
-        exe = PORT_DIR / 'bin' / 'bb-gpu-capabilities.exe'
-        if not exe.is_file():
-            exe = PORT_DIR / 'out' / 'bb-gpu-capabilities.exe'
+        suffix = '.exe' if WINDOWS else ''
+        exe = next((PORT_DIR / folder / f'bb-gpu-capabilities{suffix}' for folder in ('bin', 'out')
+                    if (PORT_DIR / folder / f'bb-gpu-capabilities{suffix}').is_file()), None)
+        if exe is None:
+            self.ui_calls.put(self.refresh_status)
+            return
         env = dict(os.environ)
-        if not (exe.parent / 'SDL3.dll').is_file():
+        if WINDOWS and not (exe.parent / 'SDL3.dll').is_file():
             clang64 = Path(os.environ.get('MSYS2_ROOT', r'C:\msys64')) / 'clang64' / 'bin'
             env['PATH'] = f'{clang64}{os.pathsep}{env.get("PATH", "")}'
         text = _('• Placa de vídeo: não verificada', '• Graphics card: not checked')
@@ -2046,8 +2182,12 @@ class Launcher(sotc_search.SearchMixin, sotc_pad.PadMixin):
         self.ui_calls.put(self.refresh_status)
 
     def restart(self):
-        """Opens the launcher again (after a language change) and closes this one."""
-        command = [sys.executable] if FROZEN else [sys.executable, str(Path(__file__).resolve())]
+        """Opens the launcher again (after a language change) and closes this one. From the
+        AppImage, the AppImage itself: the mount goes away with this process."""
+        if APPIMAGE:
+            command = [APPIMAGE]
+        else:
+            command = [sys.executable] if FROZEN else [sys.executable, str(Path(__file__).resolve())]
         try:
             subprocess.Popen(command + [a for a in sys.argv[1:] if a != '--play'], cwd=str(PORT_DIR))
         except OSError:
@@ -3178,9 +3318,9 @@ class Launcher(sotc_search.SearchMixin, sotc_pad.PadMixin):
         try:
             env = game_environment(self.app)
             env['SOTC_EVENT_LOG'] = start_event_log(user_dir(self.app), self.app, env)
-            self.process = subprocess.Popen(run_command(), cwd=PORT_DIR, env=env,
+            self.process = subprocess.Popen(run_command(), cwd=str(PORT_DIR), env=env,
                                             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                            stderr=subprocess.STDOUT, creationflags=NO_WINDOW)
+                                            stderr=subprocess.STDOUT, **spawn_options())
         except OSError as error:
             self.append(_('Não foi possível iniciar: {}', 'Could not start: {}').format(error) + '\n')
             self.process = None
@@ -3284,10 +3424,17 @@ class Launcher(sotc_search.SearchMixin, sotc_pad.PadMixin):
         self.root.clipboard_append(self.log.get('1.0', 'end'))
 
     def open_path(self, path):
-        path = Path(path or PORT_DIR)
+        path = Path(path or DATA_DIR)
         if not path.exists():
             path.mkdir(parents=True, exist_ok=True)
-        os.startfile(str(path))
+        if WINDOWS:
+            os.startfile(str(path))
+            return
+        try:
+            subprocess.Popen(['xdg-open', str(path)], env=host_environment(), stdin=subprocess.DEVNULL,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except OSError as error:
+            self.messagebox.showerror('Shadow of the Colossus', str(error))
 
     def clear_cache(self):
         if self.process:
@@ -3303,6 +3450,9 @@ class Launcher(sotc_search.SearchMixin, sotc_pad.PadMixin):
 
     def shortcut(self, play=False):
         self.collect()
+        if not WINDOWS:
+            self.linux_shortcut(play)
+            return
         script = _shortcut_script(play, FROZEN, sys.executable, PORT_DIR, self.game_icon_file())
         result = subprocess.run(['powershell', '-NoProfile', '-Command', script], capture_output=True,
                                 creationflags=NO_WINDOW)
@@ -3315,6 +3465,47 @@ class Launcher(sotc_search.SearchMixin, sotc_pad.PadMixin):
                                                   'Shortcut created on the desktop.'))
         else:
             self.messagebox.showerror('Shadow of the Colossus', result.stderr.decode(errors='replace')[:400])
+
+    def linux_shortcut(self, play=False):
+        """A .desktop entry on the desktop and in the applications menu: the launcher's window, or
+        with play the game directly (--play, also usable as a Steam non-Steam game)."""
+        if APPIMAGE:
+            command = f'"{APPIMAGE}"' + (' --play' if play else '')
+        elif FROZEN:
+            command = f'"{sys.executable}"' + (' --play' if play else '')
+        else:
+            command = f'python3 "{Path(__file__).resolve()}"' + (' --play' if play else '')
+        name = 'Shadow of the Colossus (play)' if play else 'Shadow of the Colossus'
+        icon = self.game_icon_file() or (PORT_DIR / 'launcher' / 'sotc.png')
+        entry = desktop_entry(name, command, icon)
+        try:
+            desktop = subprocess.run(['xdg-user-dir', 'DESKTOP'], capture_output=True, text=True,
+                                     env=host_environment(), timeout=5).stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            desktop = ''
+        folders = [Path(desktop) if desktop else Path.home() / 'Desktop',
+                   Path(os.environ.get('XDG_DATA_HOME') or Path.home() / '.local' / 'share') / 'applications']
+        created = []
+        for folder in dict.fromkeys(folders):
+            try:
+                if not folder.exists() and folder != folders[0]:
+                    continue  # the menu folder may not exist yet; the desktop one is the point
+                folder.mkdir(parents=True, exist_ok=True)
+                target = folder / f'{name}.desktop'
+                target.write_text(entry, encoding='utf-8')
+                target.chmod(0o755)
+                created.append(str(target))
+            except OSError:
+                continue
+        if created:
+            text = _('Atalho criado:\n{}', 'Shortcut created:\n{}').format('\n'.join(created))
+            if play:
+                text += '\n\n' + _('Ele abre o jogo direto e pode ser adicionado ao Steam como jogo não-Steam.',
+                                   'It starts the game directly and can be added to Steam as a non-Steam game.')
+            self.messagebox.showinfo('Shadow of the Colossus', text)
+        else:
+            self.messagebox.showerror('Shadow of the Colossus', _('Não foi possível criar o atalho.',
+                                                                  'The shortcut could not be created.'))
 
     # sotc: self-update from the GitHub releases (sotc_update.py).
     def check_updates(self, manual):
@@ -3358,9 +3549,13 @@ class Launcher(sotc_search.SearchMixin, sotc_pad.PadMixin):
         question = _('Há uma versão nova: v{new} (você tem v{cur}).\n\n{notes}\n\n',
                      'A new version is available: v{new} (you have v{cur}).\n\n{notes}\n\n').format(
             new=release['version'], cur=VERSION, notes=notes)
-        if not FROZEN:  # running from the sources: nothing to replace, show the release
-            if self.messagebox.askyesno('Shadow of the Colossus', question + _('Abrir a página?', 'Open the page?')):
-                os.startfile(release['page'])
+        # From the sources there is nothing to replace; on Linux the AppImage is one file that a
+        # new release replaces: both open the release page.
+        if not FROZEN or not WINDOWS:
+            note = '' if FROZEN else _('\n\nEsta é a versão Linux: baixe o AppImage novo e substitua o arquivo.',
+                                       '\n\nThis is the Linux version: download the new AppImage and replace the file.')
+            if self.messagebox.askyesno('Shadow of the Colossus', question + _('Abrir a página?', 'Open the page?') + note):
+                open_url(release['page'])
             return
         if self.messagebox.askyesno('Shadow of the Colossus', question + _(
                 'Baixar e instalar agora? Saves, cache de shaders e sotc.ini são mantidos, e o lançador abre '
@@ -3420,9 +3615,15 @@ class Launcher(sotc_search.SearchMixin, sotc_pad.PadMixin):
 
 
 class GameJob:
-    """A Windows job holding sotc.py and the bb-probe.exe it starts (Stop ends both)."""
+    """Everything a launch starts: a Windows job object holding sotc.py and the bb-probe it starts,
+    or their process group on Linux (see spawn_options). Stop ends all of it."""
 
     def __init__(self, process):
+        self.handle = None
+        self.group = None
+        if not WINDOWS:
+            self.group = process.pid
+            return
         kernel32 = ctypes.windll.kernel32
         kernel32.CreateJobObjectW.restype = ctypes.c_void_p
         self.handle = kernel32.CreateJobObjectW(None, None)
@@ -3430,8 +3631,22 @@ class GameJob:
             kernel32.AssignProcessToJobObject(ctypes.c_void_p(self.handle), ctypes.c_void_p(int(process._handle)))
 
     def terminate(self):
+        if not WINDOWS:
+            self.signal_group(signal.SIGTERM)
+            timer = threading.Timer(3, self.signal_group, args=(signal.SIGKILL,))
+            timer.daemon = True  # a closed launcher must not wait for it
+            timer.start()
+            return
         if self.handle:
             ctypes.windll.kernel32.TerminateJobObject(ctypes.c_void_p(self.handle), 1)
+
+    def signal_group(self, number):
+        if self.group is None:
+            return
+        try:
+            os.killpg(self.group, number)
+        except (ProcessLookupError, PermissionError):
+            pass
 
     def close(self):
         if self.handle:
@@ -3451,9 +3666,9 @@ def play_without_window(settings):
     env = game_environment(settings)
     env['SOTC_EVENT_LOG'] = start_event_log(log_dir, settings, env)
     with open_session_log(log_dir) as log:
-        process = subprocess.Popen(run_command(), cwd=PORT_DIR, env=env,
+        process = subprocess.Popen(run_command(), cwd=str(PORT_DIR), env=env,
                                    stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                   stderr=subprocess.STDOUT, creationflags=NO_WINDOW)
+                                   stderr=subprocess.STDOUT, **spawn_options())
         for raw in iter(process.stdout.readline, b''):
             text = raw.decode('utf-8', errors='replace')
             log.write(text)
@@ -3478,7 +3693,7 @@ def main():
     # the window (scripted tests; SOTC_UPDATE_URL can point at a test release).
     if args and args[0] == '--apply-update' and len(args) == 4:
         sys.exit(0 if sotc_update.apply_update(args[1], args[2], int(args[3])) else 1)
-    if args and args[0] == '--update-now':
+    if args and args[0] == '--update-now' and WINDOWS:  # the Linux build updates by hand
         attach_stdio()
         try:
             release = sotc_update.latest_release()
@@ -3497,7 +3712,7 @@ def main():
             sotc_update.start_applier(new_root, PORT_DIR)
         sys.exit(0)
     settings = load_settings()
-    LANG = settings.get('ui_language') or windows_language()
+    LANG = settings.get('ui_language') or system_language()
     if '--play' in args and (Path(settings['game_dir'] or '.') / 'eboot.bin').is_file():
         sys.exit(play_without_window(settings))
     try:
@@ -3507,6 +3722,11 @@ def main():
     import tkinter as tk
     from tkinter import filedialog, messagebox, ttk
     root = tk.Tk()
+    if not WINDOWS:
+        try:
+            root.tk.call('tk', 'appname', 'sotc')  # WM_CLASS, which StartupWMClass matches
+        except tk.TclError:
+            pass
     Launcher(root, tk, ttk, filedialog, messagebox)
     root.mainloop()
 

@@ -1,0 +1,95 @@
+# Linux AppImage: built on Ubuntu 24.04 so it starts on glibc 2.39 or newer (SteamOS 3.7,
+# Bazzite/Fedora 42, Debian 13, Ubuntu 24.04+), then opened on those distros before it is
+# published. Runs:
+#   - on a pushed linux-v* tag: build, test and publish that tag's release.
+#   - by hand (Actions > Linux AppImage > Run workflow), on the branch to build:
+#       - no tag: build and test only (the AppImage is kept as a workflow artifact).
+#       - tag of an existing release (e.g. linux-v0.70): the AppImage replaces the one attached to it.
+#       - new tag: test build, published as a pre-release on that commit.
+name: Linux AppImage
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release to attach the AppImage to; a new tag makes a test pre-release. Empty builds only.
+        required: false
+  push:
+    tags:
+      - 'linux-v*'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: linux-appimage-${{ inputs.tag || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+      - name: Dependencies
+        run: bash packaging/linux/ci-deps.sh
+      - name: Tests
+        run: PYTHONPATH=tests python3 -B -m unittest discover -s tests
+      - name: Build
+        run: bash build.sh
+      - name: AppImage
+        run: |
+          PATH="$PWD/out/venv/bin:$PATH" bash packaging/linux/build.sh
+          cd dist && sha256sum SotC-x86_64.AppImage | sed 's/  / */' > SotC-x86_64.AppImage.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SotC-x86_64.AppImage
+          path: dist/SotC-x86_64.AppImage*
+          if-no-files-found: error
+
+  smoke:
+    needs: build
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        # debian:13 has SteamOS 3.7's glibc (2.41), fedora:42 is Bazzite's base.
+        image: ['debian:13', 'fedora:42', 'ubuntu:24.04', 'archlinux:latest',
+                'opensuse/tumbleweed:latest']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: SotC-x86_64.AppImage
+          path: dist
+      - name: Open the launcher on ${{ matrix.image }}
+        run: |
+          chmod +x dist/SotC-x86_64.AppImage
+          docker run --rm -v "$PWD:/w:ro" "${{ matrix.image }}" bash /w/packaging/linux/smoke-test.sh /w/dist/SotC-x86_64.AppImage
+
+  publish:
+    needs: smoke
+    if: startsWith(github.ref, 'refs/tags/linux-v') || (github.event_name == 'workflow_dispatch' && inputs.tag != '')
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: SotC-x86_64.AppImage
+          path: dist
+      - name: Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" --prerelease --target "$GITHUB_SHA" --title "Linux test build $TAG" \
+              --notes "Linux test build from \`${GITHUB_SHA::7}\`. Download \`SotC-x86_64.AppImage\`, then \`chmod +x SotC-x86_64.AppImage\` and run it. Not a final release: please report in the linked issue whether it opens and runs."
+          fi
+          gh release upload "$TAG" dist/SotC-x86_64.AppImage dist/SotC-x86_64.AppImage.sha256 --clobber

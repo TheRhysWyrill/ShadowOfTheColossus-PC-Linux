@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <cstdio>
 #include <filesystem>
 #include <optional>
 #include <vector>
@@ -68,6 +69,17 @@ constexpr auto LOG_FILE = "shad_log.txt";
  * @returns True if the path is valid, false otherwise.
  */
 [[nodiscard]] bool ValidatePath(const std::filesystem::path& path);
+
+/**
+ * Opens a file with stdio in the path's native encoding: _wfopen on Windows, where fopen cannot
+ * open paths with characters outside the ANSI code page; fopen elsewhere (UTF-8).
+ *
+ * @param path Filesystem path
+ * @param mode stdio mode, as in fopen
+ *
+ * @returns The open file, or nullptr.
+ */
+[[nodiscard]] std::FILE* OpenNative(const std::filesystem::path& path, const char* mode);
 
 /**
  * Converts a filesystem path to a UTF-8 encoded std::string.

@@ -4,13 +4,16 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-Native Windows port of PS4 *Shadow of the Colossus* (CUSA08809 EU 1.01 and CUSA08034 US 1.00, the same
+Native port of PS4 *Shadow of the Colossus* for Windows and Linux (AppImage): CUSA08809 EU 1.01 and CUSA08034 US 1.00, the same
 eboot build; GPU workarounds gate on `ElfInfo::IsSotc()`, never on one serial). Not an emulator: the game's
 own x86-64 code runs directly on the host CPU, a C loader/runtime implements the PS4 system functions
 it imports, and a vendored shadPS4 video core translates the PS4 GPU (GCN command streams + shaders)
 to Vulkan/SPIR-V. Forked from bloodborne_pc ("bbport"): engine names (`bb-probe`, `bbgpu`, `bb_setjmp`,
 `BB_*` env vars, `bbport_*` sources) are kept from it; the Bloodborne-only files were removed. The
-Shadow of the Colossus path is `sotc.py` / `launcher/sotc_launcher_win.py` / `packaging/windows/package_sotc.sh`.
+Shadow of the Colossus path is `sotc.py` / `launcher/sotc_launcher_win.py` (one launcher for both
+systems) / `packaging/windows/package_sotc.sh` and `packaging/linux/build.sh` (AppImage).
+DLSS and frame generation (`vk_dlssg.cpp`, `vk_framegen.cpp`) are Windows-only: the Linux build
+has stubs of the same interface, and the launcher hides those options there.
 
 No game files or Sony firmware are in the repo, and none may be added: packaging refuses any
 `.sprx`/`.prx`. Running the game needs a local dump (`SOTC_GAME_DIR`, default `../CUSA08809`) and,
@@ -31,8 +34,14 @@ bash build.sh                            # CMake+Ninja in out/gpu -> out/bb-prob
 bash tools/pgo_train.sh                  # instrumented build + attract/shrine training -> pgo/bbgpu.profdata, rebuild
 ninja -C out/gpu bb-probe && cp out/gpu/bb-probe.exe out/   # incremental rebuild after first build.sh
 python sotc.py                           # prepare image + run game (settings: env or sotc.ini, see sotc.py docstring)
-python launcher/sotc_launcher_win.py     # Tkinter launcher (settings in %APPDATA%/sotc-launcher/settings.json)
+python launcher/sotc_launcher_win.py     # Tkinter launcher (settings in <port>/user/launcher_settings.json)
 bash packaging/windows/package_sotc.sh   # dist/SotC-PC.zip; needs WINPYTHON with PyInstaller + Pillow
+
+# Linux (Ubuntu 24.04; elsewhere nix-shell shell.nix):
+bash packaging/linux/ci-deps.sh          # once: SDL3, Vulkan-Headers and VMA that 24.04 lacks
+bash build.sh                            # out/bb-probe, out/gpu/libbbgpu.so
+python3 sotc.py                          # or bash run.sh (enters nix-shell when needed)
+bash packaging/linux/build.sh            # dist/SotC-x86_64.AppImage; PyInstaller from out/venv
 ```
 
 `build.sh` inits submodules (`gpu/third_party/*`, `third_party/LibAtrac9`) on first run.

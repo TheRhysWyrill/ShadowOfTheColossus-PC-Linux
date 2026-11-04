@@ -272,11 +272,14 @@ if (WIN32)
     # <windows.h> out of the way of std::min/max and the Vulkan/SDL headers.
     target_compile_definitions(bbgpu PUBLIC NOMINMAX WIN32_LEAN_AND_MEAN)
     target_compile_options(bbgpu PRIVATE -include ${CMAKE_CURRENT_SOURCE_DIR}/shim/bb_win_compat.h)
-    target_include_directories(bbgpu PRIVATE third_party/xbyak)
     target_link_libraries(bbgpu PUBLIC Vulkan::Vulkan ws2_32 bcrypt ntdll synchronization winmm)
 else()
     target_link_libraries(bbgpu PUBLIC PkgConfig::X11)
 endif()
+# xbyak (the JIT assembler behind flatten_extended_userdata_pass.cpp) has no MSYS2 package and
+# Ubuntu 24.04 (packaging/linux/ci-deps.sh) does not install one either: the pinned submodule is
+# the same version on every platform, so its include directory is added for all of them.
+target_include_directories(bbgpu PRIVATE third_party/xbyak)
 
 # bbport (Windows): bbgpu is a static library there, so the loader and the HLE runtime are
 # linked here, where CMake knows its dependencies (build.sh builds them with ninja).

@@ -1,0 +1,8 @@
+# Shell scripts are run by bash on Linux (the AppImage build and
+# .github/workflows/linux-appimage.yml). A CRLF checkout breaks them at the first line:
+# "build.sh: line 2: set: pipefail: invalid option name". Keep them LF everywhere,
+# whatever the contributor's core.autocrlf is.
+*.sh text eol=lf
+# The AppImage's desktop entry is read by appimagetool and by desktop environments: a trailing
+# CR in "Exec=AppRun" would be part of the value.
+*.desktop text eol=lf
